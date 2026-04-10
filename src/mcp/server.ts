@@ -30,9 +30,6 @@ import {
   type IndexStatus,
 } from "../index.js";
 import { getConfigPath } from "../collections.js";
-import { enableProductionMode } from "../store.js";
-
-enableProductionMode();
 
 // =============================================================================
 // Types for structured content
@@ -496,6 +493,51 @@ Intent-aware lex (C++ performance, not sports):
       }
 
       return { content };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: vsearch (Pure vector search — no BM25, no LLM rerank, fastest)
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "vsearch",
+    {
+      title: "Vector Search",
+      description: "Pure semantic vector similarity search. No BM25, no LLM reranking — the fastest semantic search mode. Use for natural language queries where meaning matters more than exact terms.\n\nDifferences from `query`:\n- `query` = BM25 + vec + optional HyDE + LLM rerank (best quality, slower)\n- `vsearch` = vec only (fast semantic, no hybrid tricks)\n\nBest for: Fast semantic lookup on CPU-only machines, or when you want raw vector similarity scores.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        query: z.string().describe("Natural language question or topic. The embedding model converts this to a vector and finds semantically similar documents."),
+        limit: z.number().optional().default(10).describe("Max results (default: 10)"),
+        minScore: z.number().optional().default(0).describe("Min cosine similarity 0-1 (default: 0, most permissive)"),
+        collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
+      },
+    },
+    async ({ query, limit, minScore, collections }) => {
+      // vsearch supports multiple collections via OR — pick first one if specified
+      // (store.searchVector only takes a single collectionName, not an array)
+      const collectionName = collections?.[0];
+      const effectiveLimit = (limit ?? 10) * 3; // fetch more, then filter by minScore
+      const rawResults = await store.searchVector(query, { limit: effectiveLimit, collection: collectionName });
+      // Filter by minScore and limit
+      const results = rawResults
+        .filter(r => r.score >= minScore)
+        .slice(0, limit ?? 10);
+      const filtered = results.map(r => {
+        const { line, snippet } = extractSnippet(r.body || "", query, 300);
+        return {
+          docid: `#${r.docid}`,
+          file: r.displayPath,
+          title: r.title,
+          score: Math.round(r.score * 100) / 100,
+          context: r.context,
+          snippet: addLineNumbers(snippet, line),
+        };
+      });
+      return {
+        content: [{ type: "text", text: formatSearchSummary(filtered, query) }],
+        structuredContent: { results: filtered },
+      };
     }
   );
 

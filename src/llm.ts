@@ -193,7 +193,7 @@ export type RerankDocument = {
 // HuggingFace model URIs for node-llama-cpp
 // Format: hf:<user>/<repo>/<file>
 // Override via QMD_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf)
-const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+const DEFAULT_EMBED_MODEL = "hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q4_K_M.gguf";
 const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
 // const DEFAULT_GENERATE_MODEL = "hf:ggml-org/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
@@ -385,18 +385,6 @@ export type LlamaCppConfig = {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_EXPAND_CONTEXT_SIZE = 2048;
 
-type LlamaGpuMode = "auto" | "metal" | "vulkan" | "cuda" | false;
-
-export function resolveLlamaGpuMode(envValue = process.env.QMD_LLAMA_GPU): LlamaGpuMode {
-  const normalized = envValue?.trim().toLowerCase() ?? "";
-  if (!normalized) return "auto";
-  if (["false", "off", "none", "disable", "disabled", "0"].includes(normalized)) return false;
-  if (normalized === "metal" || normalized === "vulkan" || normalized === "cuda") return normalized;
-
-  process.stderr.write(`QMD Warning: invalid QMD_LLAMA_GPU="${envValue}", using auto GPU selection.\n`);
-  return "auto";
-}
-
 function resolveExpandContextSize(configValue?: number): number {
   if (configValue !== undefined) {
     if (!Number.isInteger(configValue) || configValue <= 0) {
@@ -562,29 +550,30 @@ export class LlamaCpp implements LLM {
   /**
    * Initialize the llama instance (lazy)
    */
-  private async ensureLlama(allowBuild = true): Promise<Llama> {
+  private async ensureLlama(): Promise<Llama> {
     if (!this.llama) {
-      const gpuMode = resolveLlamaGpuMode();
+      // Allow override via QMD_LLAMA_GPU: "false" | "off" | "none" forces CPU
+      const gpuOverride = (process.env.QMD_LLAMA_GPU ?? "").toLowerCase();
+      const forceCpu = ["false", "off", "none", "disable", "disabled", "0"].includes(gpuOverride);
 
-      const loadLlama = async (gpu: LlamaGpuMode) =>
+      const loadLlama = async (gpu: "auto" | false) =>
         await getLlama({
-          build: allowBuild ? "autoAttempt" : "never",
+          build: "autoAttempt",
           logLevel: LlamaLogLevel.error,
           gpu,
-          skipDownload: !allowBuild,
         });
 
       let llama: Llama;
-      if (gpuMode === false) {
+      if (forceCpu) {
         llama = await loadLlama(false);
       } else {
         try {
-          llama = await loadLlama(gpuMode);
+          llama = await loadLlama("auto");
         } catch (err) {
           // GPU backend (e.g. Vulkan on headless/driverless machines) can throw at init.
           // Fall back to CPU so qmd still works.
           process.stderr.write(
-            `QMD Warning: GPU init failed${gpuMode === "auto" ? "" : ` for QMD_LLAMA_GPU=${gpuMode}`} (${err instanceof Error ? err.message : String(err)}), falling back to CPU.\n`
+            `QMD Warning: GPU init failed (${err instanceof Error ? err.message : String(err)}), falling back to CPU.\n`
           );
           llama = await loadLlama(false);
         }
@@ -1255,14 +1244,14 @@ export class LlamaCpp implements LLM {
    * Get device/GPU info for status display.
    * Initializes llama if not already done.
    */
-  async getDeviceInfo(options: { allowBuild?: boolean } = {}): Promise<{
+  async getDeviceInfo(): Promise<{
     gpu: string | false;
     gpuOffloading: boolean;
     gpuDevices: string[];
     vram?: { total: number; used: number; free: number };
     cpuCores: number;
   }> {
-    const llama = await this.ensureLlama(options.allowBuild ?? true);
+    const llama = await this.ensureLlama();
     const gpuDevices = await llama.getGpuDeviceNames();
     let vram: { total: number; used: number; free: number } | undefined;
     if (llama.gpu) {
